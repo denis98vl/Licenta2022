@@ -3,6 +3,39 @@ import RPi.GPIO as GPIO
 import time
 import gpiozero
 from gpiozero.pins.pigpio import PiGPIOFactory
+import paho.mqtt.client as paho
+import math
+
+# mqtt broker & client settings
+broker = '192.168.0.110'
+port = 1883
+client_id = 'MHC - BigBoost'
+
+#listener 1883 192.168.0.110
+#allow_anonymous true
+
+
+def connect_mqtt():
+    def on_connect(client, userdata, flags, rc):
+        if rc == 0:
+            print("Connected to MQTT Broker")
+        else:
+            print(f'Failed to connect, return code {rc}')
+    client = paho.Client(client_id)
+    client.on_connect = on_connect
+    client.connect(broker, port)
+    return client
+
+
+def publish(client, topic, msg):
+    result = client.publish(topic, msg)
+    # result: [0, 1]
+    status = result[0]
+    if status == 0:
+        print(f"Send `{msg}` to topic `{topic}`")
+    else:
+        print(f"Failed to send message to topic {topic}")
+
 
 # define factory
 factory = PiGPIOFactory()
@@ -11,7 +44,8 @@ factory = PiGPIOFactory()
 # defining pin on board
 LED_PIN = 13
 FLOW_SENSOR_PIN = 17
-SERVO = gpiozero.Servo(18, pin_factory=factory)
+SERVO = gpiozero.Servo(18, min_pulse_width=0.5/1000,
+                       max_pulse_width=2.5/1000, pin_factory=factory)
 ALARM = gpiozero.Buzzer(2)
 
 # setup
@@ -20,9 +54,6 @@ GPIO.setmode(GPIO.BCM)
 GPIO.setup(LED_PIN, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(FLOW_SENSOR_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-global count
-count = 0
-
 
 def countPulse(channel):
     global count
@@ -30,33 +61,36 @@ def countPulse(channel):
         count = count+1
 
 
-GPIO.add_event_detect(FLOW_SENSOR_PIN, GPIO.FALLING, callback=countPulse)
-
-
-# def servo_control(dutycycle):
-#    pwm.set_servo_pulsewidth(SERVO_PIN, dutycycle)
-
-#pwm = pigpio.pi()
-#pwm.set_mode(SERVO_PIN, pigpio.OUTPUT)
-#pwm.set_PWM_frequency(SERVO_PIN, 50)
-
-while True:
-    start_counter = 1
-    time.sleep(1)
-    start_counter = 0
-    flow = (count / 6)  # Pulse frequency (Hz) = 6*Q, Q is flow rate in L/min.
-    print("The flow is: %.3f Liter/min" % (flow))
-    if flow > 0:
-        GPIO.output(LED_PIN, GPIO.HIGH)
-        SERVO.min()
-        ALARM.beep()
-        # servo_control(500)
-        # time.sleep(5)
-    else:
-        GPIO.output(LED_PIN, GPIO.LOW)
-        SERVO.max()
-        ALARM.off()
-        # servo_control(2500)
-        # time.sleep(5)
-        #publish.single("/Garden.Pi/WaterFlow", flow, hostname=MQTT_SERVER)
+if __name__ == '__main__':
+    global count
     count = 0
+
+    GPIO.add_event_detect(FLOW_SENSOR_PIN, GPIO.FALLING, callback=countPulse)
+
+    MQTT_CLIENT = connect_mqtt()
+
+    while True:
+        start_counter = 1
+        time.sleep(1)
+        start_counter = 0
+        # Pulse frequency (Hz) = 6*Q, Q is flow rate in L/min.
+        flow = (count / 6)
+        #print(f"The flow is: {flow:.3f} Liter/min")
+        publish(MQTT_CLIENT, "MHC_DATA/DEBIT", f"{flow:.3f}")
+        if flow > 20:
+            ALARM.beep()
+            GPIO.output(LED_PIN, GPIO.HIGH)
+            SERVO.value = 30/flow
+            time.sleep(flow/1000)
+        elif flow == 0:
+
+            ALARM.off()
+            GPIO.output(LED_PIN, GPIO.LOW)
+            SERVO.mid()
+        else:
+            for i in range(45, 0, -1):
+                SERVO.value = math.sin(math.radians(i))
+                time.sleep(flow/500)
+            ALARM.off()
+            GPIO.output(LED_PIN, GPIO.LOW)
+        count = 0
